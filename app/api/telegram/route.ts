@@ -221,52 +221,55 @@ export async function POST(req: Request): Promise<NextResponse> {
 
         const results: string[] = [];
 
-        $("tbody tr").each((index: number, element: any) => {
-            const row = $(element);
+       $("tbody tr").each((index: number, element: any) => {
+  const row = $(element);
 
-            try {
-                const titleElement = row.find("td").first().find("a");
+  try {
+    const titleCell = row.find("td").eq(1);
 
-                const title = titleElement.text().trim();
-                const href = titleElement.attr("href");
+    // main series/journal link (first meaningful link)
+    const mainLink = titleCell.find("a[href^='series.php']").first();
 
-                const publisher = row.find("td").eq(2).text().trim();
+    const title = mainLink.text().trim();
 
-                // Debug only for first rows
-                if (index < 2) {
-                    console.log("[DEBUG_ROW]", {
-                        index,
-                        title,
-                        href,
-                        publisher,
-                    });
-                }
+    const href = mainLink.attr("href");
 
-                // Skip invalid rows early
-                if (!title || !href) return;
+    const publisher = row.find("td").eq(3).text().trim();
 
-                const fullLink = href.startsWith("http")
-                    ? href
-                    : `${TARGET_URL.replace(/\/$/, "")}/${href.replace(/^\//, "")}`;
+    // debug first rows
+    if (index < 2) {
+      console.log("[DEBUG_ROW]", {
+        index,
+        title,
+        href,
+        publisher,
+      });
+    }
 
-                console.log(`[PARSED_ROW_${index}]`, {
-                    title,
-                    publisher,
-                    fullLink,
-                });
+    if (!title || !href) return;
 
-                results.push(
-                    `${results.length + 1}. ${title}\n` +
-                    `Publisher: ${publisher || "Unknown"}\n` +
-                    `Link: ${fullLink}`
-                );
-            } catch (err) {
-                console.error("[ROW_PARSE_ERROR]", {
-                    index,
-                    error: err,
-                });
-            }
-        });
+    const fullLink = href.startsWith("http")
+      ? href
+      : `${TARGET_URL.replace(/\/$/, "")}/${href.replace(/^\//, "")}`;
+
+    console.log(`[PARSED_ROW_${index}]`, {
+      title,
+      publisher,
+      fullLink,
+    });
+
+    results.push(
+      `${results.length + 1}. ${title}\n` +
+      `Publisher: ${publisher || "Unknown"}\n` +
+      `Link: ${fullLink}`
+    );
+  } catch (err) {
+    console.error("[ROW_PARSE_ERROR]", {
+      index,
+      err,
+    });
+  }
+});
 
         console.log("[RESULTS_COUNT]", results.length);
 
