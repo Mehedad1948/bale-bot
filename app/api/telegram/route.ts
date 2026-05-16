@@ -122,8 +122,7 @@ export async function POST(req: Request): Promise<NextResponse> {
 
     // Build target URL
     const targetUrl =
-      `${TARGET_URL}/index.php?req=${encodeURIComponent(query)}` +
-      `&curtab=e&order=year&ordermode=asc`;
+      `${TARGET_URL}/index.php?req=${encodeURIComponent(query)}`
 
     console.log("[FETCH_URL]", targetUrl);
 
