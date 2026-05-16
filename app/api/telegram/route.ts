@@ -8,6 +8,11 @@ const TARGET_URL = process.env.TARGET_URL as string;
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 /* =========================
+   MEMORY (replace with Redis in prod)
+========================= */
+const navStack = new Map<number, string[]>();
+
+/* =========================
    TYPES
 ========================= */
 type Update = {
@@ -35,7 +40,27 @@ async function send(chatId: number, text: string, extra?: any) {
 }
 
 /* =========================
-   FETCH SEARCH RESULTS
+   STACK HELPERS
+========================= */
+function push(chatId: number, url: string) {
+  const stack = navStack.get(chatId) || [];
+  stack.push(url);
+  navStack.set(chatId, stack);
+}
+
+function pop(chatId: number) {
+  const stack = navStack.get(chatId) || [];
+  stack.pop();
+  navStack.set(chatId, stack);
+}
+
+function current(chatId: number) {
+  const stack = navStack.get(chatId) || [];
+  return stack[stack.length - 1];
+}
+
+/* =========================
+   SEARCH
 ========================= */
 async function fetchSearch(query: string) {
   const params = new URLSearchParams();
@@ -59,15 +84,12 @@ async function fetchSearch(query: string) {
   const url = `${TARGET_URL}/index.php?${params.toString()}`;
 
   const { data } = await axios.get(url);
-
   const $ = cheerio.load(data);
 
   const results: any[] = [];
 
   $("tbody tr").each((_, el) => {
-    const row = $(el);
-
-    const cell = row.find("td").eq(1);
+    const cell = $(el).find("td").eq(1);
     const link = cell.find("a[href^='series.php']").first();
 
     const title = link.text().trim();
@@ -79,51 +101,96 @@ async function fetchSearch(query: string) {
       ? href
       : `${TARGET_URL}/${href}`;
 
-    results.push({
-      title,
-      url: full,
-    });
+    results.push({ title, url: full });
   });
 
   return results;
 }
 
 /* =========================
-   FETCH DETAIL PAGE LINKS
+   FETCH ANY PAGE LINKS (FIXED)
+   - EXCLUDES NAVBAR LINKS
 ========================= */
-async function fetchDetailPage(url: string) {
+async function fetchPage(url: string) {
   const { data } = await axios.get(url);
-
   const $ = cheerio.load(data);
 
-  const links: string[] = [];
+  const items: { title: string; url: string }[] = [];
 
   $("a[href]").each((_, el) => {
-    const href = $(el).attr("href");
-    const text = $(el).text().trim();
+    const elAny = $(el);
 
-    if (!href) return;
+    const href = elAny.attr("href");
+    const title = elAny.text().trim();
 
-    // filter junk links
+    if (!href || title.length < 2) return;
+
+    // ❌ skip junk links
     if (
-      href.includes("javascript") ||
-      href === "#" ||
-      text.length < 2
-    )
-      return;
+      href.startsWith("javascript") ||
+      href === "#"
+    ) return;
+
+    // ❌ SKIP ANY LINK INSIDE NAVBAR
+    if (
+      elAny.closest(".navbar").length > 0 ||
+      elAny.closest("nav").length > 0
+    ) return;
 
     const full = href.startsWith("http")
       ? href
-      : `${TARGET_URL}/${href}`;
+      : `${TARGET_URL}/${href.replace(/^\//, "")}`;
 
-    links.push(`${text || "link"}\n${full}`);
+    items.push({
+      title,
+      url: full,
+    });
   });
 
-  return links.slice(0, 20);
+  return items.slice(0, 10);
 }
 
 /* =========================
-   HANDLER
+   RENDER NODE
+========================= */
+async function render(chatId: number, url: string) {
+  push(chatId, url);
+
+  const items = await fetchPage(url);
+
+  if (items.length === 0) {
+    await send(chatId, "No further links.");
+    return;
+  }
+
+  const message = items
+    .map((i, idx) => `${idx + 1}. ${i.title}`)
+    .join("\n");
+
+  const keyboard = {
+    inline_keyboard: [
+      ...items.map((i) => [
+        {
+          text: i.title.slice(0, 30),
+          callback_data: `open:${encodeURIComponent(i.url)}`,
+        },
+      ]),
+      [
+        {
+          text: "⬅ Back",
+          callback_data: "back",
+        },
+      ],
+    ],
+  };
+
+  await send(chatId, message, {
+    reply_markup: keyboard,
+  });
+}
+
+/* =========================
+   MAIN HANDLER
 ========================= */
 export async function POST(req: Request) {
   const body: Update = await req.json();
@@ -134,76 +201,62 @@ export async function POST(req: Request) {
 
   if (!chatId) return NextResponse.json({ ok: true });
 
-  /* =========================
-     CALLBACK HANDLER
-  ========================= */
   const cb = body.callback_query?.data;
-
-  if (cb?.startsWith("open:")) {
-    const url = decodeURIComponent(cb.replace("open:", ""));
-
-    await send(chatId, "Fetching page...");
-
-    const links = await fetchDetailPage(url);
-
-    const msg =
-      links.join("\n\n") || "No links found";
-
-    await send(chatId, msg);
-
-    return NextResponse.json({ ok: true });
-  }
-
-  /* =========================
-     SEARCH HANDLER
-  ========================= */
   const text = body.message?.text;
 
-  if (!text?.startsWith("/search")) {
-    await send(chatId, "Use /search query");
+  /* =========================
+     BACK BUTTON
+  ========================= */
+  if (cb === "back") {
+    pop(chatId);
+
+    const prev = current(chatId);
+
+    if (!prev) {
+      await send(chatId, "No previous page.");
+      return NextResponse.json({ ok: true });
+    }
+
+    await send(chatId, "⬅ Going back...");
+    await render(chatId, prev);
+
     return NextResponse.json({ ok: true });
   }
-
-  const query = text.replace("/search", "").trim();
-
-  if (!query) {
-    await send(chatId, "Send /search something");
-    return NextResponse.json({ ok: true });
-  }
-
-  const results = await fetchSearch(query);
-
-  const preview = results.slice(0, 5);
-
-  const message = preview
-    .map(
-      (r, i) => `${i + 1}. ${r.title}\n${r.url}`
-    )
-    .join("\n\n");
 
   /* =========================
-     INLINE BUTTONS
+     OPEN NODE
   ========================= */
-  const keyboard = {
-    inline_keyboard: [
-      ...preview.map((r) => [
+  if (cb?.startsWith("open:")) {
+    const url = decodeURIComponent(cb.replace("open:", ""));
+    await render(chatId, url);
+    return NextResponse.json({ ok: true });
+  }
+
+  /* =========================
+     SEARCH
+  ========================= */
+  if (text?.startsWith("/search")) {
+    const query = text.replace("/search", "").trim();
+
+    const results = await fetchSearch(query);
+
+    const keyboard = {
+      inline_keyboard: results.slice(0, 5).map((r) => [
         {
-          text: "📄 Open",
+          text: r.title.slice(0, 30),
           callback_data: `open:${encodeURIComponent(r.url)}`,
         },
       ]),
-      [
-        {
-          text: "📚 Load more",
-          callback_data: `more:${encodeURIComponent(query)}`,
-        },
-      ],
-    ],
-  };
+    };
 
-  await send(chatId, message, {
-    reply_markup: keyboard,
-  });
+    await send(
+      chatId,
+      results.map((r, i) => `${i + 1}. ${r.title}`).join("\n"),
+      { reply_markup: keyboard }
+    );
+
+    return NextResponse.json({ ok: true });
+  }
 
   return NextResponse.json({ ok: true });
 }
