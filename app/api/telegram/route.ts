@@ -8,6 +8,18 @@ const TARGET_URL = process.env.TARGET_URL as string;
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 /* =========================
+   MEMORY STORE (replace with Redis later)
+========================= */
+const sessionStore = new Map<
+  number,
+  {
+    results?: string[];
+    pageItems?: { title: string; url: string }[];
+    pageUrl?: string;
+  }
+>();
+
+/* =========================
    TYPES
 ========================= */
 type Update = {
@@ -24,167 +36,215 @@ type Update = {
 };
 
 /* =========================
-   TELEGRAM
+   TELEGRAM SEND (SAFE)
 ========================= */
 async function send(chatId: number, text: string, extra?: any) {
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id: chatId,
-    text,
-    ...extra,
-  });
+  try {
+    await axios.post(`${TELEGRAM_API}/sendMessage`, {
+      chat_id: chatId,
+      text,
+      ...extra,
+    });
+  } catch (e: any) {
+    console.error("Telegram error:", e?.response?.data || e.message);
+  }
 }
 
 /* =========================
-   NORMALIZE URL
-========================= */
-function normalizeUrl(href: string) {
-  if (!href) return null;
-
-  if (href.startsWith("http")) return href;
-
-  return `${TARGET_URL.replace(/\/$/, "")}/${href.replace(/^\//, "")}`;
-}
-
-/* =========================
-   FETCH SEARCH
+   SEARCH PAGE
 ========================= */
 async function fetchSearch(query: string) {
   const params = new URLSearchParams();
 
   params.append("req", query);
 
-  ["t", "a", "s", "y", "p", "i"].forEach(v => params.append("columns[]", v));
-  ["f", "e", "s", "a", "p", "w"].forEach(v => params.append("objects[]", v));
-  ["l", "c", "f", "a", "m", "r", "s"].forEach(v => params.append("topics[]", v));
+  ["t", "a", "s", "y", "p", "i"].forEach((v) =>
+    params.append("columns[]", v)
+  );
+  ["f", "e", "s", "a", "p", "w"].forEach((v) =>
+    params.append("objects[]", v)
+  );
+  ["l", "c", "f", "a", "m", "r", "s"].forEach((v) =>
+    params.append("topics[]", v)
+  );
 
   params.append("res", "25");
-  params.append("filesuns", "all");
-  params.append("curtab", "e");
 
   const url = `${TARGET_URL}/index.php?${params.toString()}`;
 
-  const { data } = await axios.get(url, {
-    headers: { "User-Agent": "Mozilla/5.0" },
-  });
-
+  const { data } = await axios.get(url);
   const $ = cheerio.load(data);
 
   const results: { title: string; url: string }[] = [];
 
   $("tbody tr").each((_, el) => {
-    const row = $(el);
+    const link = $(el)
+      .find("td")
+      .eq(1)
+      .find("a[href^='series.php']")
+      .first();
 
-    // IMPORTANT: only main result tables, skip nested UI tables
-    if (row.closest(".navbar, nav, header").length > 0) return;
+    const title = link.text().trim();
+    const href = link.attr("href");
 
-    const cell = row.find("td").eq(1);
+    if (!title || !href) return;
 
-    const a = cell.find("a[href*='series.php']").first();
-
-    const title = a.text().trim();
-    const href = a.attr("href");
-
-    const full = href ? normalizeUrl(href) : null;
-
-    if (!title || !full) return;
-
-    results.push({ title, url: full });
+    results.push({
+      title,
+      url: href.startsWith("http")
+        ? href
+        : `${TARGET_URL}/${href}`,
+    });
   });
 
   return results;
 }
 
 /* =========================
-   FETCH DETAIL PAGE (FIXED)
-   - excludes navbar links
-   - excludes junk UI links
+   DETAIL PAGE (FIXED)
+   - excludes navbar
+   - extracts structured links only
 ========================= */
-async function fetchPage(url: string) {
-  const { data } = await axios.get(url, {
-    headers: { "User-Agent": "Mozilla/5.0" },
-  });
-
+async function fetchDetailPage(url: string) {
+  const { data } = await axios.get(url);
   const $ = cheerio.load(data);
 
   const items: { title: string; url: string }[] = [];
 
-  $("a[href]").each((_, el) => {
-    const el$ = $(el);
+  // ONLY main table links, NOT navbar
+  $("table#tablelibgen a[href]").each((_, el) => {
+    const parentNav = $(el).closest(".navbar");
+    if (parentNav.length) return; // 🔥 EXCLUDE NAVBAR
 
-    // 🚫 HARD FILTER: skip navbar/menu/header areas
-    if (
-      el$.closest(".navbar, nav, header, .menu, .top, .footer").length > 0
-    ) return;
-
-    const href = el$.attr("href");
-    const text = el$.text().trim();
+    const href = $(el).attr("href");
+    const text = $(el).text().trim();
 
     if (!href || text.length < 2) return;
-
-    // 🚫 filter junk links
-    if (
-      href.startsWith("javascript") ||
-      href === "#" ||
-      href.includes("mailto:")
-    ) return;
-
-    const full = normalizeUrl(href);
-
-    if (!full) return;
+    if (href.startsWith("javascript") || href === "#") return;
 
     items.push({
       title: text,
-      url: full,
+      url: href.startsWith("http")
+        ? href
+        : `${TARGET_URL}/${href.replace(/^\//, "")}`,
     });
   });
 
-  // remove duplicates
-  const unique = Array.from(
-    new Map(items.map(i => [i.url, i])).values()
-  );
-
-  return unique.slice(0, 15);
+  return items;
 }
 
 /* =========================
-   RENDER PAGE
+   RENDER PAGE WITH PAGINATION
 ========================= */
-async function render(chatId: number, url: string) {
-  const items = await fetchPage(url);
+async function renderDetail(
+  chatId: number,
+  url: string,
+  page = 0
+) {
+  const PAGE_SIZE = 8;
 
-  if (items.length === 0) {
-    await send(chatId, "No further links found.");
+  let session = sessionStore.get(chatId);
+
+  if (!session || session.pageUrl !== url) {
+    const items = await fetchDetailPage(url);
+
+    session = {
+      pageUrl: url,
+      pageItems: items,
+    };
+
+    sessionStore.set(chatId, session);
+  }
+
+  const items = session.pageItems || [];
+
+  const start = page * PAGE_SIZE;
+  const slice = items.slice(start, start + PAGE_SIZE);
+
+  if (slice.length === 0) {
+    await send(chatId, "No more items.");
     return;
   }
 
-  const message = items
-    .map((i, idx) => `${idx + 1}. ${i.title}`)
+  const text = slice
+    .map((i, idx) => `${start + idx + 1}. ${i.title}`)
     .join("\n");
 
-  const keyboard = {
+  const keyboard: any = {
     inline_keyboard: [
-      ...items.map(i => [
+      ...slice.map((i, idx) => [
         {
-          text: i.title.slice(0, 35),
-          callback_data: `open:${encodeURIComponent(i.url)}`,
+          text: i.title.slice(0, 30),
+          callback_data: `o:${start + idx}`,
         },
       ]),
-      [
-        {
-          text: "⬅ Back",
-          callback_data: "back",
-        },
-      ],
     ],
   };
 
-  await send(chatId, message, {
-    reply_markup: keyboard,
-  });
+  // pagination controls
+  const navRow: any[] = [];
+
+  if (page > 0) {
+    navRow.push({
+      text: "⬅ Prev",
+      callback_data: `p:${page - 1}`,
+    });
+  }
+
+  if (start + PAGE_SIZE < items.length) {
+    navRow.push({
+      text: "Next ➡",
+      callback_data: `p:${page + 1}`,
+    });
+  }
+
+  if (navRow.length) keyboard.inline_keyboard.push(navRow);
+
+  await send(chatId, text, { reply_markup: keyboard });
 }
 
 /* =========================
-   HANDLER
+   OPEN ITEM PAGE (optional deep navigation)
+========================= */
+async function openItem(chatId: number, index: number) {
+  const session = sessionStore.get(chatId);
+  if (!session?.pageItems?.[index]) return;
+
+  const item = session.pageItems[index];
+
+  const { data } = await axios.get(item.url);
+  const $ = cheerio.load(data);
+
+  const links: string[] = [];
+
+  // IMPORTANT: exclude navbar here too
+  $("a[href]").each((_, el) => {
+    if ($(el).closest(".navbar").length) return;
+
+    const href = $(el).attr("href");
+    const text = $(el).text().trim();
+
+    if (!href || text.length < 2) return;
+
+    if (href.startsWith("javascript") || href === "#") return;
+
+    links.push(
+      `${text}\n${
+        href.startsWith("http")
+          ? href
+          : `${TARGET_URL}/${href}`
+      }`
+    );
+  });
+
+  const msg =
+    links.slice(0, 15).join("\n\n") || "No links found";
+
+  await send(chatId, msg);
+}
+
+/* =========================
+   MAIN HANDLER
 ========================= */
 export async function POST(req: Request) {
   const body: Update = await req.json();
@@ -195,8 +255,34 @@ export async function POST(req: Request) {
 
   if (!chatId) return NextResponse.json({ ok: true });
 
-  const text = body.message?.text;
   const cb = body.callback_query?.data;
+  const text = body.message?.text;
+
+  /* =========================
+     CALLBACK ROUTING
+  ========================= */
+  if (cb?.startsWith("p:")) {
+    const page = Number(cb.split(":")[1]);
+    const session = sessionStore.get(chatId);
+
+    if (session?.pageUrl) {
+      await renderDetail(chatId, session.pageUrl, page);
+    }
+
+    return NextResponse.json({ ok: true });
+  }
+
+  if (cb?.startsWith("o:")) {
+    const index = Number(cb.split(":")[1]);
+    await openItem(chatId, index);
+    return NextResponse.json({ ok: true });
+  }
+
+  if (cb?.startsWith("open:")) {
+    const url = decodeURIComponent(cb.replace("open:", ""));
+    await renderDetail(chatId, url, 0);
+    return NextResponse.json({ ok: true });
+  }
 
   /* =========================
      SEARCH
@@ -206,15 +292,10 @@ export async function POST(req: Request) {
 
     const results = await fetchSearch(query);
 
-    if (results.length === 0) {
-      await send(chatId, "No results found.");
-      return NextResponse.json({ ok: true });
-    }
-
     const keyboard = {
-      inline_keyboard: results.slice(0, 6).map(r => [
+      inline_keyboard: results.slice(0, 5).map((r) => [
         {
-          text: r.title.slice(0, 35),
+          text: r.title.slice(0, 30),
           callback_data: `open:${encodeURIComponent(r.url)}`,
         },
       ]),
@@ -226,23 +307,6 @@ export async function POST(req: Request) {
       { reply_markup: keyboard }
     );
 
-    return NextResponse.json({ ok: true });
-  }
-
-  /* =========================
-     OPEN PAGE (DRILL DOWN)
-  ========================= */
-  if (cb?.startsWith("open:")) {
-    const url = decodeURIComponent(cb.replace("open:", ""));
-    await render(chatId, url);
-    return NextResponse.json({ ok: true });
-  }
-
-  /* =========================
-     BACK NOT IMPLEMENTED YET
-  ========================= */
-  if (cb === "back") {
-    await send(chatId, "Back navigation not stored in this version.");
     return NextResponse.json({ ok: true });
   }
 
