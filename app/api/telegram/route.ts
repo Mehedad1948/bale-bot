@@ -18,18 +18,17 @@ type TelegramMessage = {
   };
 };
 
-function escapeMarkdown(text: string) {
-  return text.replace(/[_*[\]()~`>#+=|{}.!-]/g, "\\$&");
-}
-
 async function sendTelegramMessage(chatId: number, text: string) {
   try {
+    console.log("[TELEGRAM] Sending message to:", chatId);
+
     await axios.post(
       TELEGRAM_API_URL,
       {
         chat_id: chatId,
         text,
-        parse_mode: "MarkdownV2",
+        // IMPORTANT:
+        // No parse_mode to avoid Telegram Markdown parsing issues
       },
       {
         timeout: 15000,
@@ -38,7 +37,7 @@ async function sendTelegramMessage(chatId: number, text: string) {
 
     console.log("[TELEGRAM] Message sent successfully");
   } catch (error: any) {
-    console.error("[TELEGRAM] Failed to send message");
+    console.error("[TELEGRAM_ERROR] Failed to send message");
 
     if (axios.isAxiosError(error)) {
       console.error({
@@ -52,11 +51,14 @@ async function sendTelegramMessage(chatId: number, text: string) {
 }
 
 export async function POST(req: Request): Promise<NextResponse> {
-  console.log("========================================");
+  console.log("================================================");
   console.log("[WEBHOOK] Incoming Telegram webhook");
 
   try {
+    // =========================
     // ENV VALIDATION
+    // =========================
+
     if (!TELEGRAM_TOKEN) {
       throw new Error("Missing TELEGRAM_TOKEN env");
     }
@@ -74,37 +76,49 @@ export async function POST(req: Request): Promise<NextResponse> {
       throw new Error(`Invalid TARGET_URL: ${TARGET_URL}`);
     }
 
+    // =========================
+    // PARSE BODY
+    // =========================
+
     const body: TelegramMessage = await req.json();
 
-    console.log("[BODY]", JSON.stringify(body, null, 2));
+    console.log("[BODY]");
+    console.log(JSON.stringify(body, null, 2));
 
     const chatId = body.message?.chat.id;
     const userText = body.message?.text;
 
     if (!chatId) {
-      console.log("[SKIP] No chat id found");
+      console.log("[SKIP] No chat id");
       return NextResponse.json({ message: "No chat id" });
     }
 
     if (!userText) {
-      console.log("[SKIP] No text message");
+      console.log("[SKIP] No text");
       return NextResponse.json({ message: "No text" });
     }
 
     console.log("[MESSAGE]", userText);
 
+    // =========================
+    // COMMAND VALIDATION
+    // =========================
+
     if (!userText.startsWith("/search")) {
-      console.log("[SKIP] Not a search command");
+      console.log("[SKIP] Not a /search command");
 
       await sendTelegramMessage(
         chatId,
-        "Use:\n`/search your query`"
+        "Use:\n/search your query"
       );
 
       return NextResponse.json({ message: "Ignored" });
     }
 
-    // Extract query
+    // =========================
+    // EXTRACT QUERY
+    // =========================
+
     const query = userText.replace(/^\/search\s*/i, "").trim();
 
     console.log("[QUERY]", query);
@@ -114,22 +128,30 @@ export async function POST(req: Request): Promise<NextResponse> {
 
       await sendTelegramMessage(
         chatId,
-        "Please provide a search query\\.\nExample:\n`/search mathematics`"
+        "Please provide a search query.\n\nExample:\n/search mathematics"
       );
 
       return NextResponse.json({ message: "Empty query" });
     }
 
-    // Build target URL
+    // =========================
+    // BUILD TARGET URL
+    // =========================
+
     const targetUrl =
-      `${TARGET_URL}/index.php?req=${encodeURIComponent(query)}`
+      `${TARGET_URL}/index.php?req=${encodeURIComponent(query)}`;
 
     console.log("[FETCH_URL]", targetUrl);
 
-    // Fetch HTML
+    // =========================
+    // FETCH HTML
+    // =========================
+
     let html = "";
 
     try {
+      console.log("[FETCH] Sending request...");
+
       const response = await axios.get<string>(targetUrl, {
         timeout: 20000,
         headers: {
@@ -139,25 +161,24 @@ export async function POST(req: Request): Promise<NextResponse> {
 
       html = response.data;
 
-      console.log("[FETCH] HTML fetched successfully");
+      console.log("[FETCH] Success");
       console.log("[FETCH] HTML length:", html.length);
     } catch (fetchError: any) {
-      console.error("[FETCH_ERROR]", fetchError);
-
-      let errorMessage = "Failed to fetch search results";
+      console.error("[FETCH_ERROR]");
 
       if (axios.isAxiosError(fetchError)) {
-        errorMessage += `\nStatus: ${fetchError.response?.status || "unknown"}`;
-
         console.error({
+          message: fetchError.message,
           status: fetchError.response?.status,
           data: fetchError.response?.data,
         });
+      } else {
+        console.error(fetchError);
       }
 
       await sendTelegramMessage(
         chatId,
-        escapeMarkdown(errorMessage)
+        "Failed to fetch search results from target website."
       );
 
       return NextResponse.json(
@@ -166,14 +187,22 @@ export async function POST(req: Request): Promise<NextResponse> {
       );
     }
 
-    // Parse HTML
+    // =========================
+    // PARSE HTML
+    // =========================
+
+    console.log("[PARSER] Loading HTML into cheerio");
+
     const $ = cheerio.load(html);
 
-    let results: string[] = [];
+    const results: string[] = [];
 
-    $("tr").each((_: number, element: any) => {
+    $("tr").each((index: number, element: any) => {
       try {
-        const titleElement = $(element).find("td").eq(0).find("a");
+        const titleElement = $(element)
+          .find("td")
+          .eq(0)
+          .find("a");
 
         const title = titleElement.text().trim();
 
@@ -188,10 +217,16 @@ export async function POST(req: Request): Promise<NextResponse> {
         if (title && link) {
           const fullLink = `${TARGET_URL}/${link}`;
 
+          console.log(`[RESULT_${index}]`, {
+            title,
+            publisher,
+            fullLink,
+          });
+
           results.push(
-            `*${escapeMarkdown(title)}*\n` +
-              `Publisher: ${escapeMarkdown(publisher || "Unknown")}\n` +
-              `Link: ${escapeMarkdown(fullLink)}`
+            `${results.length + 1}. ${title}\n` +
+              `Publisher: ${publisher || "Unknown"}\n` +
+              `Link: ${fullLink}`
           );
         }
       } catch (rowError) {
@@ -201,16 +236,19 @@ export async function POST(req: Request): Promise<NextResponse> {
 
     console.log("[RESULTS_COUNT]", results.length);
 
+    // =========================
+    // BUILD RESPONSE
+    // =========================
+
     let resultsText = "";
 
     if (results.length === 0) {
-      resultsText = `No results found for *${escapeMarkdown(query)}*`;
+      resultsText = `No results found for: ${query}`;
     } else {
-      // Telegram message limit safety
       const limitedResults = results.slice(0, 10);
 
       resultsText =
-        `📚 *Search Results for:* ${escapeMarkdown(query)}\n\n` +
+        `Search Results for: ${query}\n\n` +
         limitedResults.join("\n\n");
 
       if (results.length > 10) {
@@ -218,18 +256,33 @@ export async function POST(req: Request): Promise<NextResponse> {
       }
     }
 
-    console.log("[TELEGRAM] Sending response");
+    // Telegram hard limit safety
+    if (resultsText.length > 3900) {
+      resultsText = resultsText.slice(0, 3900);
+      resultsText += "\n\nMessage trimmed due to Telegram limit.";
+    }
+
+    console.log("[RESPONSE_LENGTH]", resultsText.length);
+
+    // =========================
+    // SEND TO TELEGRAM
+    // =========================
+
+    console.log("[TELEGRAM] Sending final response");
 
     await sendTelegramMessage(chatId, resultsText);
 
     console.log("[DONE] Request processed successfully");
 
     return NextResponse.json(
-      { message: "OK" },
+      {
+        message: "OK",
+        resultsCount: results.length,
+      },
       { status: 200 }
     );
   } catch (error: any) {
-    console.error("========================================");
+    console.error("================================================");
     console.error("[FATAL_ERROR]");
 
     if (axios.isAxiosError(error)) {
@@ -242,6 +295,10 @@ export async function POST(req: Request): Promise<NextResponse> {
       console.error(error);
     }
 
+    // =========================
+    // SEND ERROR TO TELEGRAM
+    // =========================
+
     try {
       const body: TelegramMessage = await req.clone().json();
 
@@ -249,9 +306,8 @@ export async function POST(req: Request): Promise<NextResponse> {
 
       if (chatId) {
         const errorMessage =
-          `❌ Error occurred\n\n` +
-          `Message:\n` +
-          `${escapeMarkdown(error.message || "Unknown error")}`;
+          "An internal server error occurred.\n\n" +
+          `Error:\n${error?.message || "Unknown error"}`;
 
         await sendTelegramMessage(chatId, errorMessage);
       }
