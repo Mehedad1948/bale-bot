@@ -8,11 +8,6 @@ const TARGET_URL = process.env.TARGET_URL as string;
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 /* =========================
-   MEMORY (replace with Redis in prod)
-========================= */
-const navStack = new Map<number, string[]>();
-
-/* =========================
    TYPES
 ========================= */
 type Update = {
@@ -29,7 +24,7 @@ type Update = {
 };
 
 /* =========================
-   TELEGRAM SEND
+   TELEGRAM
 ========================= */
 async function send(chatId: number, text: string, extra?: any) {
   await axios.post(`${TELEGRAM_API}/sendMessage`, {
@@ -40,42 +35,27 @@ async function send(chatId: number, text: string, extra?: any) {
 }
 
 /* =========================
-   STACK HELPERS
+   NORMALIZE URL
 ========================= */
-function push(chatId: number, url: string) {
-  const stack = navStack.get(chatId) || [];
-  stack.push(url);
-  navStack.set(chatId, stack);
-}
+function normalizeUrl(href: string) {
+  if (!href) return null;
 
-function pop(chatId: number) {
-  const stack = navStack.get(chatId) || [];
-  stack.pop();
-  navStack.set(chatId, stack);
-}
+  if (href.startsWith("http")) return href;
 
-function current(chatId: number) {
-  const stack = navStack.get(chatId) || [];
-  return stack[stack.length - 1];
+  return `${TARGET_URL.replace(/\/$/, "")}/${href.replace(/^\//, "")}`;
 }
 
 /* =========================
-   SEARCH
+   FETCH SEARCH
 ========================= */
 async function fetchSearch(query: string) {
   const params = new URLSearchParams();
 
   params.append("req", query);
 
-  ["t", "a", "s", "y", "p", "i"].forEach(v =>
-    params.append("columns[]", v)
-  );
-  ["f", "e", "s", "a", "p", "w"].forEach(v =>
-    params.append("objects[]", v)
-  );
-  ["l", "c", "f", "a", "m", "r", "s"].forEach(v =>
-    params.append("topics[]", v)
-  );
+  ["t", "a", "s", "y", "p", "i"].forEach(v => params.append("columns[]", v));
+  ["f", "e", "s", "a", "p", "w"].forEach(v => params.append("objects[]", v));
+  ["l", "c", "f", "a", "m", "r", "s"].forEach(v => params.append("topics[]", v));
 
   params.append("res", "25");
   params.append("filesuns", "all");
@@ -83,23 +63,30 @@ async function fetchSearch(query: string) {
 
   const url = `${TARGET_URL}/index.php?${params.toString()}`;
 
-  const { data } = await axios.get(url);
+  const { data } = await axios.get(url, {
+    headers: { "User-Agent": "Mozilla/5.0" },
+  });
+
   const $ = cheerio.load(data);
 
-  const results: any[] = [];
+  const results: { title: string; url: string }[] = [];
 
   $("tbody tr").each((_, el) => {
-    const cell = $(el).find("td").eq(1);
-    const link = cell.find("a[href^='series.php']").first();
+    const row = $(el);
 
-    const title = link.text().trim();
-    const href = link.attr("href");
+    // IMPORTANT: only main result tables, skip nested UI tables
+    if (row.closest(".navbar, nav, header").length > 0) return;
 
-    if (!title || !href) return;
+    const cell = row.find("td").eq(1);
 
-    const full = href.startsWith("http")
-      ? href
-      : `${TARGET_URL}/${href}`;
+    const a = cell.find("a[href*='series.php']").first();
+
+    const title = a.text().trim();
+    const href = a.attr("href");
+
+    const full = href ? normalizeUrl(href) : null;
+
+    if (!title || !full) return;
 
     results.push({ title, url: full });
   });
@@ -108,58 +95,65 @@ async function fetchSearch(query: string) {
 }
 
 /* =========================
-   FETCH ANY PAGE LINKS (FIXED)
-   - EXCLUDES NAVBAR LINKS
+   FETCH DETAIL PAGE (FIXED)
+   - excludes navbar links
+   - excludes junk UI links
 ========================= */
 async function fetchPage(url: string) {
-  const { data } = await axios.get(url);
+  const { data } = await axios.get(url, {
+    headers: { "User-Agent": "Mozilla/5.0" },
+  });
+
   const $ = cheerio.load(data);
 
   const items: { title: string; url: string }[] = [];
 
   $("a[href]").each((_, el) => {
-    const elAny = $(el);
+    const el$ = $(el);
 
-    const href = elAny.attr("href");
-    const title = elAny.text().trim();
+    // 🚫 HARD FILTER: skip navbar/menu/header areas
+    if (
+      el$.closest(".navbar, nav, header, .menu, .top, .footer").length > 0
+    ) return;
 
-    if (!href || title.length < 2) return;
+    const href = el$.attr("href");
+    const text = el$.text().trim();
 
-    // ❌ skip junk links
+    if (!href || text.length < 2) return;
+
+    // 🚫 filter junk links
     if (
       href.startsWith("javascript") ||
-      href === "#"
+      href === "#" ||
+      href.includes("mailto:")
     ) return;
 
-    // ❌ SKIP ANY LINK INSIDE NAVBAR
-    if (
-      elAny.closest(".navbar").length > 0 ||
-      elAny.closest("nav").length > 0
-    ) return;
+    const full = normalizeUrl(href);
 
-    const full = href.startsWith("http")
-      ? href
-      : `${TARGET_URL}/${href.replace(/^\//, "")}`;
+    if (!full) return;
 
     items.push({
-      title,
+      title: text,
       url: full,
     });
   });
 
-  return items.slice(0, 10);
+  // remove duplicates
+  const unique = Array.from(
+    new Map(items.map(i => [i.url, i])).values()
+  );
+
+  return unique.slice(0, 15);
 }
 
 /* =========================
-   RENDER NODE
+   RENDER PAGE
 ========================= */
 async function render(chatId: number, url: string) {
-  push(chatId, url);
-
   const items = await fetchPage(url);
 
   if (items.length === 0) {
-    await send(chatId, "No further links.");
+    await send(chatId, "No further links found.");
     return;
   }
 
@@ -169,9 +163,9 @@ async function render(chatId: number, url: string) {
 
   const keyboard = {
     inline_keyboard: [
-      ...items.map((i) => [
+      ...items.map(i => [
         {
-          text: i.title.slice(0, 30),
+          text: i.title.slice(0, 35),
           callback_data: `open:${encodeURIComponent(i.url)}`,
         },
       ]),
@@ -190,7 +184,7 @@ async function render(chatId: number, url: string) {
 }
 
 /* =========================
-   MAIN HANDLER
+   HANDLER
 ========================= */
 export async function POST(req: Request) {
   const body: Update = await req.json();
@@ -201,36 +195,8 @@ export async function POST(req: Request) {
 
   if (!chatId) return NextResponse.json({ ok: true });
 
-  const cb = body.callback_query?.data;
   const text = body.message?.text;
-
-  /* =========================
-     BACK BUTTON
-  ========================= */
-  if (cb === "back") {
-    pop(chatId);
-
-    const prev = current(chatId);
-
-    if (!prev) {
-      await send(chatId, "No previous page.");
-      return NextResponse.json({ ok: true });
-    }
-
-    await send(chatId, "⬅ Going back...");
-    await render(chatId, prev);
-
-    return NextResponse.json({ ok: true });
-  }
-
-  /* =========================
-     OPEN NODE
-  ========================= */
-  if (cb?.startsWith("open:")) {
-    const url = decodeURIComponent(cb.replace("open:", ""));
-    await render(chatId, url);
-    return NextResponse.json({ ok: true });
-  }
+  const cb = body.callback_query?.data;
 
   /* =========================
      SEARCH
@@ -240,10 +206,15 @@ export async function POST(req: Request) {
 
     const results = await fetchSearch(query);
 
+    if (results.length === 0) {
+      await send(chatId, "No results found.");
+      return NextResponse.json({ ok: true });
+    }
+
     const keyboard = {
-      inline_keyboard: results.slice(0, 5).map((r) => [
+      inline_keyboard: results.slice(0, 6).map(r => [
         {
-          text: r.title.slice(0, 30),
+          text: r.title.slice(0, 35),
           callback_data: `open:${encodeURIComponent(r.url)}`,
         },
       ]),
@@ -255,6 +226,23 @@ export async function POST(req: Request) {
       { reply_markup: keyboard }
     );
 
+    return NextResponse.json({ ok: true });
+  }
+
+  /* =========================
+     OPEN PAGE (DRILL DOWN)
+  ========================= */
+  if (cb?.startsWith("open:")) {
+    const url = decodeURIComponent(cb.replace("open:", ""));
+    await render(chatId, url);
+    return NextResponse.json({ ok: true });
+  }
+
+  /* =========================
+     BACK NOT IMPLEMENTED YET
+  ========================= */
+  if (cb === "back") {
+    await send(chatId, "Back navigation not stored in this version.");
     return NextResponse.json({ ok: true });
   }
 
