@@ -221,44 +221,50 @@ export async function POST(req: Request): Promise<NextResponse> {
 
         const results: string[] = [];
 
-        $("tr").each((index: number, element: any) => {
-            if (index < 2) {
-                console.log('✅✅', element);
+        $("tbody tr").each((index: number, element: any) => {
+            const row = $(element);
 
-            }
             try {
-                const titleElement = $(element)
-                    .find("td")
-                    .eq(0)
-                    .find("a");
+                const titleElement = row.find("td").first().find("a");
 
                 const title = titleElement.text().trim();
+                const href = titleElement.attr("href");
 
-                const link = titleElement.attr("href");
+                const publisher = row.find("td").eq(2).text().trim();
 
-                const publisher = $(element)
-                    .find("td")
-                    .eq(2)
-                    .text()
-                    .trim();
-
-                if (title && link) {
-                    const fullLink = `${TARGET_URL}/${link}`;
-
-                    console.log(`[RESULT_${index}]`, {
+                // Debug only for first rows
+                if (index < 2) {
+                    console.log("[DEBUG_ROW]", {
+                        index,
                         title,
+                        href,
                         publisher,
-                        fullLink,
                     });
-
-                    results.push(
-                        `${results.length + 1}. ${title}\n` +
-                        `Publisher: ${publisher || "Unknown"}\n` +
-                        `Link: ${fullLink}`
-                    );
                 }
-            } catch (rowError) {
-                console.error("[ROW_PARSE_ERROR]", rowError);
+
+                // Skip invalid rows early
+                if (!title || !href) return;
+
+                const fullLink = href.startsWith("http")
+                    ? href
+                    : `${TARGET_URL.replace(/\/$/, "")}/${href.replace(/^\//, "")}`;
+
+                console.log(`[PARSED_ROW_${index}]`, {
+                    title,
+                    publisher,
+                    fullLink,
+                });
+
+                results.push(
+                    `${results.length + 1}. ${title}\n` +
+                    `Publisher: ${publisher || "Unknown"}\n` +
+                    `Link: ${fullLink}`
+                );
+            } catch (err) {
+                console.error("[ROW_PARSE_ERROR]", {
+                    index,
+                    error: err,
+                });
             }
         });
 
