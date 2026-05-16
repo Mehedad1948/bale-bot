@@ -1,82 +1,274 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { NextResponse } from 'next/server'
-import axios from 'axios'
-import * as cheerio from 'cheerio'
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN as string
-const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`
-const TARGET_URL=process.env.TELEGRAM_TOKEN as string as string
+import { NextResponse } from "next/server";
+import axios from "axios";
+import * as cheerio from "cheerio";
+
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN as string;
+const TARGET_URL = process.env.TARGET_URL as string;
+
+const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
 
 type TelegramMessage = {
   message?: {
     chat: {
-      id: number
+      id: number;
+    };
+    text?: string;
+  };
+};
+
+function escapeMarkdown(text: string) {
+  return text.replace(/[_*[\]()~`>#+=|{}.!-]/g, "\\$&");
+}
+
+async function sendTelegramMessage(chatId: number, text: string) {
+  try {
+    await axios.post(
+      TELEGRAM_API_URL,
+      {
+        chat_id: chatId,
+        text,
+        parse_mode: "MarkdownV2",
+      },
+      {
+        timeout: 15000,
+      }
+    );
+
+    console.log("[TELEGRAM] Message sent successfully");
+  } catch (error: any) {
+    console.error("[TELEGRAM] Failed to send message");
+
+    if (axios.isAxiosError(error)) {
+      console.error({
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+    } else {
+      console.error(error);
     }
-    text?: string
   }
 }
 
 export async function POST(req: Request): Promise<NextResponse> {
+  console.log("========================================");
+  console.log("[WEBHOOK] Incoming Telegram webhook");
+
   try {
-    const body: TelegramMessage = await req.json()
+    // ENV VALIDATION
+    if (!TELEGRAM_TOKEN) {
+      throw new Error("Missing TELEGRAM_TOKEN env");
+    }
 
-    // Check if the message contains text
-    if (body.message?.text) {
-      const chatId = body.message.chat.id
-      const userText = body.message.text
+    if (!TARGET_URL) {
+      throw new Error("Missing TARGET_URL env");
+    }
 
-      if (userText.startsWith('/search')) {
-        // Extract the query after the "/search" command
-        const query = userText.replace(/^\/search\s*/i, '').trim()
+    console.log("[ENV] TARGET_URL:", TARGET_URL);
 
-        // Handle empty queries
-        if (!query) {
-          await axios.post(TELEGRAM_API_URL, {
-            chat_id: chatId,
-            text: 'Please provide a search query. Example: `/search mathematics`',
-            parse_mode: 'Markdown',
-          })
-          return NextResponse.json({ message: 'Empty query' }, { status: 200 })
+    // Validate URL
+    try {
+      new URL(TARGET_URL);
+    } catch {
+      throw new Error(`Invalid TARGET_URL: ${TARGET_URL}`);
+    }
+
+    const body: TelegramMessage = await req.json();
+
+    console.log("[BODY]", JSON.stringify(body, null, 2));
+
+    const chatId = body.message?.chat.id;
+    const userText = body.message?.text;
+
+    if (!chatId) {
+      console.log("[SKIP] No chat id found");
+      return NextResponse.json({ message: "No chat id" });
+    }
+
+    if (!userText) {
+      console.log("[SKIP] No text message");
+      return NextResponse.json({ message: "No text" });
+    }
+
+    console.log("[MESSAGE]", userText);
+
+    if (!userText.startsWith("/search")) {
+      console.log("[SKIP] Not a search command");
+
+      await sendTelegramMessage(
+        chatId,
+        "Use:\n`/search your query`"
+      );
+
+      return NextResponse.json({ message: "Ignored" });
+    }
+
+    // Extract query
+    const query = userText.replace(/^\/search\s*/i, "").trim();
+
+    console.log("[QUERY]", query);
+
+    if (!query) {
+      console.log("[ERROR] Empty query");
+
+      await sendTelegramMessage(
+        chatId,
+        "Please provide a search query\\.\nExample:\n`/search mathematics`"
+      );
+
+      return NextResponse.json({ message: "Empty query" });
+    }
+
+    // Build target URL
+    const targetUrl =
+      `${TARGET_URL}/index.php?req=${encodeURIComponent(query)}` +
+      `&curtab=e&order=year&ordermode=asc`;
+
+    console.log("[FETCH_URL]", targetUrl);
+
+    // Fetch HTML
+    let html = "";
+
+    try {
+      const response = await axios.get<string>(targetUrl, {
+        timeout: 20000,
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+        },
+      });
+
+      html = response.data;
+
+      console.log("[FETCH] HTML fetched successfully");
+      console.log("[FETCH] HTML length:", html.length);
+    } catch (fetchError: any) {
+      console.error("[FETCH_ERROR]", fetchError);
+
+      let errorMessage = "Failed to fetch search results";
+
+      if (axios.isAxiosError(fetchError)) {
+        errorMessage += `\nStatus: ${fetchError.response?.status || "unknown"}`;
+
+        console.error({
+          status: fetchError.response?.status,
+          data: fetchError.response?.data,
+        });
+      }
+
+      await sendTelegramMessage(
+        chatId,
+        escapeMarkdown(errorMessage)
+      );
+
+      return NextResponse.json(
+        { message: "Fetch failed" },
+        { status: 500 }
+      );
+    }
+
+    // Parse HTML
+    const $ = cheerio.load(html);
+
+    let results: string[] = [];
+
+    $("tr").each((_: number, element: any) => {
+      try {
+        const titleElement = $(element).find("td").eq(0).find("a");
+
+        const title = titleElement.text().trim();
+
+        const link = titleElement.attr("href");
+
+        const publisher = $(element)
+          .find("td")
+          .eq(2)
+          .text()
+          .trim();
+
+        if (title && link) {
+          const fullLink = `${TARGET_URL}/${link}`;
+
+          results.push(
+            `*${escapeMarkdown(title)}*\n` +
+              `Publisher: ${escapeMarkdown(publisher || "Unknown")}\n` +
+              `Link: ${escapeMarkdown(fullLink)}`
+          );
         }
+      } catch (rowError) {
+        console.error("[ROW_PARSE_ERROR]", rowError);
+      }
+    });
 
-        // 1. Fetch HTML with the dynamic user query
-        const targetUrl = `${TARGET_URL}/index.php?req=${encodeURIComponent(query)}&curtab=e&order=year&ordermode=asc`
-        const { data: html } = await axios.get<string>(targetUrl)
+    console.log("[RESULTS_COUNT]", results.length);
 
-        // 2. Parse HTML
-        const $ = cheerio.load(html)
-        let resultsText = `📚 *Search Results for "${query}":*\n\n`
+    let resultsText = "";
 
-        // 3. Iterate table rows (Type-safe Element)
-        $('tr').each((_: number, element: any) => {
-          const titleElement = $(element).find('td').eq(0).find('a')
-          const title = titleElement.text().trim()
-          const link = titleElement.attr('href')
-          const publisher = $(element).find('td').eq(2).text().trim()
+    if (results.length === 0) {
+      resultsText = `No results found for *${escapeMarkdown(query)}*`;
+    } else {
+      // Telegram message limit safety
+      const limitedResults = results.slice(0, 10);
 
-          if (title && link) {
-            resultsText += `*${title}*\n`
-            resultsText += `Publisher: ${publisher}\n`
-            resultsText += `Link: ${TARGET_URL}/${link}\n\n`
-          }
-        })
+      resultsText =
+        `📚 *Search Results for:* ${escapeMarkdown(query)}\n\n` +
+        limitedResults.join("\n\n");
 
-        if (resultsText === `📚 *Search Results for "${query}":*\n\n`) {
-          resultsText = `No results found for "${query}".`
-        }
-
-        // 4. Send result to Telegram
-        await axios.post(TELEGRAM_API_URL, {
-          chat_id: chatId,
-          text: resultsText,
-          parse_mode: 'Markdown',
-        })
+      if (results.length > 10) {
+        resultsText += `\n\nAnd ${results.length - 10} more results...`;
       }
     }
 
-    return NextResponse.json({ message: 'OK' }, { status: 200 })
-  } catch (error) {
-    console.error('Webhook error:', error)
-    return NextResponse.json({ message: 'Error processed' }, { status: 200 })
+    console.log("[TELEGRAM] Sending response");
+
+    await sendTelegramMessage(chatId, resultsText);
+
+    console.log("[DONE] Request processed successfully");
+
+    return NextResponse.json(
+      { message: "OK" },
+      { status: 200 }
+    );
+  } catch (error: any) {
+    console.error("========================================");
+    console.error("[FATAL_ERROR]");
+
+    if (axios.isAxiosError(error)) {
+      console.error({
+        message: error.message,
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+    } else {
+      console.error(error);
+    }
+
+    try {
+      const body: TelegramMessage = await req.clone().json();
+
+      const chatId = body.message?.chat.id;
+
+      if (chatId) {
+        const errorMessage =
+          `❌ Error occurred\n\n` +
+          `Message:\n` +
+          `${escapeMarkdown(error.message || "Unknown error")}`;
+
+        await sendTelegramMessage(chatId, errorMessage);
+      }
+    } catch (telegramError) {
+      console.error(
+        "[ERROR_REPORTING_FAILED]",
+        telegramError
+      );
+    }
+
+    return NextResponse.json(
+      {
+        message: "Internal server error",
+        error: error?.message || "Unknown error",
+      },
+      { status: 500 }
+    );
   }
 }
