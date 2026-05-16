@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server'
 import axios from 'axios'
 import * as cheerio from 'cheerio'
-import type { Element } from 'cheerio' // Import the Element type
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN as string
 const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`
