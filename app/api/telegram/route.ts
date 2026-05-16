@@ -8,16 +8,9 @@ const TARGET_URL = process.env.TARGET_URL as string;
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 /* =========================
-   MEMORY STORE (replace with Redis later)
+   MEMORY (replace with Redis in prod)
 ========================= */
-const sessionStore = new Map<
-  number,
-  {
-    results?: string[];
-    pageItems?: { title: string; url: string }[];
-    pageUrl?: string;
-  }
->();
+const navStack = new Map<number, string[]>();
 
 /* =========================
    TYPES
@@ -36,225 +29,164 @@ type Update = {
 };
 
 /* =========================
-   TELEGRAM SEND (SAFE)
+   TELEGRAM SEND
 ========================= */
 async function send(chatId: number, text: string, extra?: any) {
-  try {
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
-      chat_id: chatId,
-      text,
-      ...extra,
-    });
-  } catch (e: any) {
-    console.error("Telegram error:", e?.response?.data || e.message);
-  }
+  await axios.post(`${TELEGRAM_API}/sendMessage`, {
+    chat_id: chatId,
+    text,
+    ...extra,
+  });
 }
 
 /* =========================
-   SEARCH PAGE
+   STACK HELPERS
+========================= */
+function push(chatId: number, url: string) {
+  const stack = navStack.get(chatId) || [];
+  stack.push(url);
+  navStack.set(chatId, stack);
+}
+
+function pop(chatId: number) {
+  const stack = navStack.get(chatId) || [];
+  stack.pop();
+  navStack.set(chatId, stack);
+}
+
+function current(chatId: number) {
+  const stack = navStack.get(chatId) || [];
+  return stack[stack.length - 1];
+}
+
+/* =========================
+   SEARCH
 ========================= */
 async function fetchSearch(query: string) {
   const params = new URLSearchParams();
 
   params.append("req", query);
 
-  ["t", "a", "s", "y", "p", "i"].forEach((v) =>
+  ["t", "a", "s", "y", "p", "i"].forEach(v =>
     params.append("columns[]", v)
   );
-  ["f", "e", "s", "a", "p", "w"].forEach((v) =>
+  ["f", "e", "s", "a", "p", "w"].forEach(v =>
     params.append("objects[]", v)
   );
-  ["l", "c", "f", "a", "m", "r", "s"].forEach((v) =>
+  ["l", "c", "f", "a", "m", "r", "s"].forEach(v =>
     params.append("topics[]", v)
   );
 
   params.append("res", "25");
+  params.append("filesuns", "all");
+  params.append("curtab", "e");
 
   const url = `${TARGET_URL}/index.php?${params.toString()}`;
 
   const { data } = await axios.get(url);
   const $ = cheerio.load(data);
 
-  const results: { title: string; url: string }[] = [];
+  const results: any[] = [];
 
   $("tbody tr").each((_, el) => {
-    const link = $(el)
-      .find("td")
-      .eq(1)
-      .find("a[href^='series.php']")
-      .first();
+    const cell = $(el).find("td").eq(1);
+    const link = cell.find("a[href^='series.php']").first();
 
     const title = link.text().trim();
     const href = link.attr("href");
 
     if (!title || !href) return;
 
-    results.push({
-      title,
-      url: href.startsWith("http")
-        ? href
-        : `${TARGET_URL}/${href}`,
-    });
+    const full = href.startsWith("http")
+      ? href
+      : `${TARGET_URL}/${href}`;
+
+    results.push({ title, url: full });
   });
 
   return results;
 }
 
 /* =========================
-   DETAIL PAGE (FIXED)
-   - excludes navbar
-   - extracts structured links only
+   FETCH ANY PAGE LINKS (FIXED)
+   - EXCLUDES NAVBAR LINKS
 ========================= */
-async function fetchDetailPage(url: string) {
+async function fetchPage(url: string) {
   const { data } = await axios.get(url);
   const $ = cheerio.load(data);
 
   const items: { title: string; url: string }[] = [];
 
-  // grab only main content table rows
-  $("#tablelibgen tbody tr, table#tablelibgen tr").each((_, el) => {
-    const row = $(el);
+  $("a[href]").each((_, el) => {
+    const elAny = $(el);
 
-    // skip navbar or junk sections
-    if (row.closest(".navbar").length) return;
+    const href = elAny.attr("href");
+    const title = elAny.text().trim();
 
-    const links = row.find("a[href]");
+    if (!href || title.length < 2) return;
 
-    links.each((_, a) => {
-      const el = $(a);
+    // ❌ skip junk links
+    if (
+      href.startsWith("javascript") ||
+      href === "#"
+    ) return;
 
-      const href = el.attr("href");
-      const text = el.text().trim();
+    // ❌ SKIP ANY LINK INSIDE NAVBAR
+    if (
+      elAny.closest(".navbar").length > 0 ||
+      elAny.closest("nav").length > 0
+    ) return;
 
-      if (!href || text.length < 2) return;
-      if (href.startsWith("javascript") || href === "#") return;
+    const full = href.startsWith("http")
+      ? href
+      : `${TARGET_URL}/${href.replace(/^\//, "")}`;
 
-      // avoid header links like "Year", "Issue"
-      if (
-        text.toLowerCase().includes("year") ||
-        text.toLowerCase().includes("issue")
-      )
-        return;
-
-      const full = href.startsWith("http")
-        ? href
-        : `${TARGET_URL}/${href.replace(/^\//, "")}`;
-
-      items.push({ title: text, url: full });
+    items.push({
+      title,
+      url: full,
     });
   });
 
-  return items;
+  return items.slice(0, 10);
 }
 
 /* =========================
-   RENDER PAGE WITH PAGINATION
+   RENDER NODE
 ========================= */
-async function renderDetail(
-  chatId: number,
-  url: string,
-  page = 0
-) {
-  const PAGE_SIZE = 8;
+async function render(chatId: number, url: string) {
+  push(chatId, url);
 
-  let session = sessionStore.get(chatId);
+  const items = await fetchPage(url);
 
-  if (!session || session.pageUrl !== url) {
-    const items = await fetchDetailPage(url);
-
-    session = {
-      pageUrl: url,
-      pageItems: items,
-    };
-
-    sessionStore.set(chatId, session);
-  }
-
-  const items = session.pageItems || [];
-
-  const start = page * PAGE_SIZE;
-  const slice = items.slice(start, start + PAGE_SIZE);
-
-  if (slice.length === 0) {
-    await send(chatId, "No more items.");
+  if (items.length === 0) {
+    await send(chatId, "No further links.");
     return;
   }
 
-  const text = slice
-    .map((i, idx) => `${start + idx + 1}. ${i.title}`)
+  const message = items
+    .map((i, idx) => `${idx + 1}. ${i.title}`)
     .join("\n");
 
-  const keyboard: any = {
+  const keyboard = {
     inline_keyboard: [
-      ...slice.map((i, idx) => [
+      ...items.map((i) => [
         {
           text: i.title.slice(0, 30),
-          callback_data: `o:${start + idx}`,
+          callback_data: `open:${encodeURIComponent(i.url)}`,
         },
       ]),
+      [
+        {
+          text: "⬅ Back",
+          callback_data: "back",
+        },
+      ],
     ],
   };
 
-  // pagination controls
-  const navRow: any[] = [];
-
-  if (page > 0) {
-    navRow.push({
-      text: "⬅ Prev",
-      callback_data: `p:${page - 1}`,
-    });
-  }
-
-  if (start + PAGE_SIZE < items.length) {
-    navRow.push({
-      text: "Next ➡",
-      callback_data: `p:${page + 1}`,
-    });
-  }
-
-  if (navRow.length) keyboard.inline_keyboard.push(navRow);
-
-  await send(chatId, text, { reply_markup: keyboard });
-}
-
-/* =========================
-   OPEN ITEM PAGE (optional deep navigation)
-========================= */
-async function openItem(chatId: number, index: number) {
-  const session = sessionStore.get(chatId);
-  if (!session?.pageItems?.[index]) return;
-
-  const item = session.pageItems[index];
-
-  const { data } = await axios.get(item.url);
-  const $ = cheerio.load(data);
-
-  const links: string[] = [];
-
-  // IMPORTANT: exclude navbar here too
-  $("a[href]").each((_, el) => {
-    if ($(el).closest(".navbar").length) return;
-
-    const href = $(el).attr("href");
-    const text = $(el).text().trim();
-
-    if (!href || text.length < 2) return;
-
-    if (href.startsWith("javascript") || href === "#") return;
-
-    links.push(
-      `${text}\n${
-        href.startsWith("http")
-          ? href
-          : `${TARGET_URL}/${href}`
-      }`
-    );
+  await send(chatId, message, {
+    reply_markup: keyboard,
   });
-
-  const msg =
-    links.slice(0, 15).join("\n\n") || "No links found";
-
-  await send(chatId, msg);
 }
 
 /* =========================
@@ -273,28 +205,30 @@ export async function POST(req: Request) {
   const text = body.message?.text;
 
   /* =========================
-     CALLBACK ROUTING
+     BACK BUTTON
   ========================= */
-  if (cb?.startsWith("p:")) {
-    const page = Number(cb.split(":")[1]);
-    const session = sessionStore.get(chatId);
+  if (cb === "back") {
+    pop(chatId);
 
-    if (session?.pageUrl) {
-      await renderDetail(chatId, session.pageUrl, page);
+    const prev = current(chatId);
+
+    if (!prev) {
+      await send(chatId, "No previous page.");
+      return NextResponse.json({ ok: true });
     }
 
+    await send(chatId, "⬅ Going back...");
+    await render(chatId, prev);
+
     return NextResponse.json({ ok: true });
   }
 
-  if (cb?.startsWith("o:")) {
-    const index = Number(cb.split(":")[1]);
-    await openItem(chatId, index);
-    return NextResponse.json({ ok: true });
-  }
-
+  /* =========================
+     OPEN NODE
+  ========================= */
   if (cb?.startsWith("open:")) {
     const url = decodeURIComponent(cb.replace("open:", ""));
-    await renderDetail(chatId, url, 0);
+    await render(chatId, url);
     return NextResponse.json({ ok: true });
   }
 
