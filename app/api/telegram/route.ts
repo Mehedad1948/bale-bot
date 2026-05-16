@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { NextResponse } from "next/server";
 import axios from "axios";
 import * as cheerio from "cheerio";
@@ -7,9 +5,12 @@ import * as cheerio from "cheerio";
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN as string;
 const TARGET_URL = process.env.TARGET_URL as string;
 
-const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
-type TelegramMessage = {
+/* =========================
+   TYPES
+========================= */
+type Update = {
   message?: {
     chat: { id: number };
     text?: string;
@@ -23,39 +24,33 @@ type TelegramMessage = {
 };
 
 /* =========================
-   TELEGRAM SENDER
+   TELEGRAM SEND
 ========================= */
-async function sendTelegramMessage(chatId: number, text: string, extra?: any) {
-  try {
-    console.log("[TELEGRAM] Sending message:", chatId);
-
-    await axios.post(
-      TELEGRAM_API_URL,
-      {
-        chat_id: chatId,
-        text,
-        ...extra, // inline keyboard support
-      },
-      { timeout: 15000 }
-    );
-
-    console.log("[TELEGRAM] Sent");
-  } catch (error) {
-    console.error("[TELEGRAM_ERROR]", error);
-  }
+async function send(chatId: number, text: string, extra?: any) {
+  await axios.post(`${TELEGRAM_API}/sendMessage`, {
+    chat_id: chatId,
+    text,
+    ...extra,
+  });
 }
 
 /* =========================
-   FETCH + PARSE LOGIC
+   FETCH SEARCH RESULTS
 ========================= */
-async function fetchResults(query: string) {
+async function fetchSearch(query: string) {
   const params = new URLSearchParams();
 
   params.append("req", query);
 
-  ["t", "a", "s", "y", "p", "i"].forEach(v => params.append("columns[]", v));
-  ["f", "e", "s", "a", "p", "w"].forEach(v => params.append("objects[]", v));
-  ["l", "c", "f", "a", "m", "r", "s"].forEach(v => params.append("topics[]", v));
+  ["t", "a", "s", "y", "p", "i"].forEach(v =>
+    params.append("columns[]", v)
+  );
+  ["f", "e", "s", "a", "p", "w"].forEach(v =>
+    params.append("objects[]", v)
+  );
+  ["l", "c", "f", "a", "m", "r", "s"].forEach(v =>
+    params.append("topics[]", v)
+  );
 
   params.append("res", "25");
   params.append("filesuns", "all");
@@ -63,38 +58,30 @@ async function fetchResults(query: string) {
 
   const url = `${TARGET_URL}/index.php?${params.toString()}`;
 
-  console.log("[FETCH_URL]", url);
+  const { data } = await axios.get(url);
 
-  const { data: html } = await axios.get(url, {
-    timeout: 20000,
-    headers: { "User-Agent": "Mozilla/5.0" },
-  });
+  const $ = cheerio.load(data);
 
-  const $ = cheerio.load(html);
-
-  const results: { title: string; link: string; publisher: string }[] = [];
+  const results: any[] = [];
 
   $("tbody tr").each((_, el) => {
     const row = $(el);
 
-    const titleCell = row.find("td").eq(1);
-    const a = titleCell.find("a[href^='series.php']").first();
+    const cell = row.find("td").eq(1);
+    const link = cell.find("a[href^='series.php']").first();
 
-    const title = a.text().trim();
-    const href = a.attr("href");
+    const title = link.text().trim();
+    const href = link.attr("href");
 
     if (!title || !href) return;
 
-    const publisher = row.find("td").eq(3).text().trim();
-
-    const fullLink = href.startsWith("http")
+    const full = href.startsWith("http")
       ? href
-      : `${TARGET_URL.replace(/\/$/, "")}/${href.replace(/^\//, "")}`;
+      : `${TARGET_URL}/${href}`;
 
     results.push({
       title,
-      link: fullLink,
-      publisher: publisher || "Unknown",
+      url: full,
     });
   });
 
@@ -102,101 +89,121 @@ async function fetchResults(query: string) {
 }
 
 /* =========================
-   MAIN HANDLER
+   FETCH DETAIL PAGE LINKS
 ========================= */
-export async function POST(req: Request): Promise<NextResponse> {
-  console.log("==================================");
-  console.log("[WEBHOOK] Incoming update");
+async function fetchDetailPage(url: string) {
+  const { data } = await axios.get(url);
 
-  try {
-    const body: TelegramMessage = await req.json();
+  const $ = cheerio.load(data);
 
-    const chatId =
-      body.message?.chat.id ||
-      body.callback_query?.message.chat.id;
+  const links: string[] = [];
 
-    const text = body.message?.text;
-    const callback = body.callback_query?.data;
+  $("a[href]").each((_, el) => {
+    const href = $(el).attr("href");
+    const text = $(el).text().trim();
 
-    if (!chatId) {
-      return NextResponse.json({ ok: false });
-    }
+    if (!href) return;
 
-    /* =========================
-       HANDLE CALLBACK (BUTTON)
-    ========================= */
-    if (callback?.startsWith("load:")) {
-      const query = decodeURIComponent(callback.replace("load:", ""));
+    // filter junk links
+    if (
+      href.includes("javascript") ||
+      href === "#" ||
+      text.length < 2
+    )
+      return;
 
-      console.log("[CALLBACK_QUERY]", query);
+    const full = href.startsWith("http")
+      ? href
+      : `${TARGET_URL}/${href}`;
 
-      await sendTelegramMessage(chatId, "Loading full results...");
+    links.push(`${text || "link"}\n${full}`);
+  });
 
-      const results = await fetchResults(query);
+  return links.slice(0, 20);
+}
 
-      const message =
-        results
-          .slice(0, 15)
-          .map((r, i) =>
-            `${i + 1}. ${r.title}\n${r.publisher}\n${r.link}`
-          )
-          .join("\n\n") || "No results found";
+/* =========================
+   HANDLER
+========================= */
+export async function POST(req: Request) {
+  const body: Update = await req.json();
 
-      await sendTelegramMessage(chatId, message);
+  const chatId =
+    body.message?.chat.id ||
+    body.callback_query?.message.chat.id;
 
-      return NextResponse.json({ ok: true });
-    }
+  if (!chatId) return NextResponse.json({ ok: true });
 
-    /* =========================
-       HANDLE /SEARCH
-    ========================= */
-    if (!text?.startsWith("/search")) {
-      await sendTelegramMessage(chatId, "Use /search query");
-      return NextResponse.json({ ok: true });
-    }
+  /* =========================
+     CALLBACK HANDLER
+  ========================= */
+  const cb = body.callback_query?.data;
 
-    const query = text.replace(/^\/search\s*/i, "").trim();
+  if (cb?.startsWith("open:")) {
+    const url = decodeURIComponent(cb.replace("open:", ""));
 
-    if (!query) {
-      await sendTelegramMessage(chatId, "Send: /search mathematics");
-      return NextResponse.json({ ok: true });
-    }
+    await send(chatId, "Fetching page...");
 
-    console.log("[QUERY]", query);
+    const links = await fetchDetailPage(url);
 
-    const results = await fetchResults(query);
+    const msg =
+      links.join("\n\n") || "No links found";
 
-    const preview = results.slice(0, 5);
+    await send(chatId, msg);
 
-    const message =
-      preview
-        .map((r, i) =>
-          `${i + 1}. ${r.title}\n${r.publisher}\n${r.link}`
-        )
-        .join("\n\n") || "No results found";
-
-    await sendTelegramMessage(chatId, message, {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            {
-              text: "📚 Load more results",
-              callback_data: `load:${encodeURIComponent(query)}`,
-            },
-          ],
-        ],
-      },
-    });
-
-    return NextResponse.json({
-      ok: true,
-      count: results.length,
-    });
-  } catch (error) {
-    console.error("[FATAL]", error);
-    return NextResponse.json(
-      { ok: false },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: true });
   }
+
+  /* =========================
+     SEARCH HANDLER
+  ========================= */
+  const text = body.message?.text;
+
+  if (!text?.startsWith("/search")) {
+    await send(chatId, "Use /search query");
+    return NextResponse.json({ ok: true });
+  }
+
+  const query = text.replace("/search", "").trim();
+
+  if (!query) {
+    await send(chatId, "Send /search something");
+    return NextResponse.json({ ok: true });
+  }
+
+  const results = await fetchSearch(query);
+
+  const preview = results.slice(0, 5);
+
+  const message = preview
+    .map(
+      (r, i) => `${i + 1}. ${r.title}\n${r.url}`
+    )
+    .join("\n\n");
+
+  /* =========================
+     INLINE BUTTONS
+  ========================= */
+  const keyboard = {
+    inline_keyboard: [
+      ...preview.map((r) => [
+        {
+          text: "📄 Open",
+          callback_data: `open:${encodeURIComponent(r.url)}`,
+        },
+      ]),
+      [
+        {
+          text: "📚 Load more",
+          callback_data: `more:${encodeURIComponent(query)}`,
+        },
+      ],
+    ],
+  };
+
+  await send(chatId, message, {
+    reply_markup: keyboard,
+  });
+
+  return NextResponse.json({ ok: true });
 }
