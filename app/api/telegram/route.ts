@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextResponse } from 'next/server'
 import axios from 'axios'
 import * as cheerio from 'cheerio'
@@ -46,7 +47,7 @@ export async function POST(req: Request): Promise<NextResponse> {
         let resultsText = `📚 *Search Results for "${query}":*\n\n`
 
         // 3. Iterate table rows (Type-safe Element)
-        $('tr').each((_: number, element: Element) => {
+        $('tr').each((_: number, element: any) => {
           const titleElement = $(element).find('td').eq(0).find('a')
           const title = titleElement.text().trim()
           const link = titleElement.attr('href')
