@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextResponse } from "next/server";
 import axios from "axios";
 import * as cheerio from "cheerio";
@@ -108,29 +109,68 @@ async function fetchSearch(query: string) {
 /* =========================
    FETCH ANY PAGE LINKS
 ========================= */
+/* =========================
+   FETCH ANY PAGE LINKS
+========================= */
 async function fetchPage(url: string) {
   const { data } = await axios.get(url);
   const $ = cheerio.load(data);
 
   const items: { title: string; url: string }[] = [];
-  const seenUrls = new Set<string>(); // Prevent duplicate links on the same page
+  const seenUrls = new Set<string>(); 
 
-  $("a[href]").each((_, el) => {
+  // 1. SPECIFIC EXTRACTION: Look for the issues table first
+  const issuesTableLinks = $("#tablelibgen a[href*='req=issuesid']");
+  
+  if (issuesTableLinks.length > 0) {
+    issuesTableLinks.each((_, el) => {
+      const elAny = $(el);
+      const href = elAny.attr("href");
+      let title = elAny.text().trim();
+
+      if (!href) return;
+
+      // If the text is just a number (like "1") or "???", it's an issue. 
+      // Let's build a clean title by extracting the volume/issue from the URL itself!
+      if (/^\d+$/.test(title) || title === "???") {
+         const volMatch = href.match(/issuevolume:([a-zA-Z0-9]+)/);
+         const issueMatch = href.match(/issuenumber:([a-zA-Z0-9]+)/);
+         
+         if (volMatch && issueMatch) {
+           title = `Vol ${volMatch[1]}, Issue ${issueMatch[1]}`;
+         } else if (volMatch) {
+           title = `Vol ${volMatch[1]}, Issue ${title}`;
+         }
+      }
+
+      const full = href.startsWith("http")
+        ? href
+        : `${TARGET_URL}/${href.replace(/^\//, "")}`;
+
+      if (seenUrls.has(full)) return;
+      seenUrls.add(full);
+
+      items.push({
+        title: title.replace(/\s+/g, ' '),
+        url: full,
+      });
+    });
+
+    // Return up to 30 issues so the user can see a good chunk of the table
+    return items.slice(0, 30);
+  }
+
+  // 2. GENERIC EXTRACTION: Fallback for regular pages
+  $("a[href]").each((_: any, el: any) => {
     const elAny = $(el);
     const href = elAny.attr("href");
-    
-    // Try inner text, fallback to title attribute
     const title = elAny.text().trim() || elAny.attr("title")?.trim();
 
     if (!href || !title || title.length < 2) return;
 
-    // ❌ Skip junk links
     if (href.startsWith("javascript") || href.startsWith("#") || href.startsWith("mailto:")) return;
 
-    // ❌ SKIP NAVBAR / FOOTER / HEADER LINKS
-    if (
-      elAny.closest(".navbar, nav, header, footer, [class*='nav'], [class*='menu']").length > 0
-    ) {
+    if (elAny.closest(".navbar, nav, header, footer, [class*='nav'], [class*='menu']").length > 0) {
       return;
     }
 
@@ -142,14 +182,14 @@ async function fetchPage(url: string) {
     seenUrls.add(full);
 
     items.push({
-      title: title.replace(/\s+/g, ' '), // Clean up multi-line text
+      title: title.replace(/\s+/g, ' '), 
       url: full,
     });
   });
 
-  // Limit to 10 to avoid huge messages (adjust if needed)
-  return items.slice(0, 10);
+  return items.slice(0, 15);
 }
+
 
 /* =========================
    RENDER NODE
