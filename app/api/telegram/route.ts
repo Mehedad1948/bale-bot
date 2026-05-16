@@ -4,13 +4,20 @@ import * as cheerio from "cheerio";
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN as string;
 const TARGET_URL = process.env.TARGET_URL as string;
-
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 /* =========================
-   MEMORY (replace with Redis in prod)
+   MEMORY (Replace with Redis in prod)
 ========================= */
 const navStack = new Map<number, string[]>();
+const urlCache = new Map<string, string>(); // Maps shortId -> full URL
+
+function cacheUrl(url: string): string {
+  // Generate a random 8-character ID
+  const id = Math.random().toString(36).substring(2, 10);
+  urlCache.set(id, url);
+  return id;
+}
 
 /* =========================
    TYPES
@@ -32,11 +39,15 @@ type Update = {
    TELEGRAM SEND
 ========================= */
 async function send(chatId: number, text: string, extra?: any) {
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id: chatId,
-    text,
-    ...extra,
-  });
+  try {
+    await axios.post(`${TELEGRAM_API}/sendMessage`, {
+      chat_id: chatId,
+      text,
+      ...extra,
+    });
+  } catch (error: any) {
+    console.error("Telegram Send Error:", error.response?.data || error.message);
+  }
 }
 
 /* =========================
@@ -44,19 +55,19 @@ async function send(chatId: number, text: string, extra?: any) {
 ========================= */
 function push(chatId: number, url: string) {
   const stack = navStack.get(chatId) || [];
-  stack.push(url);
+  // Prevent pushing duplicates if reloading the same page
+  if (stack[stack.length - 1] !== url) {
+    stack.push(url);
+  }
   navStack.set(chatId, stack);
 }
 
 function pop(chatId: number) {
   const stack = navStack.get(chatId) || [];
-  stack.pop();
+  stack.pop(); // Remove current page
+  const prev = stack[stack.length - 1]; // Get previous page
   navStack.set(chatId, stack);
-}
-
-function current(chatId: number) {
-  const stack = navStack.get(chatId) || [];
-  return stack[stack.length - 1];
+  return prev;
 }
 
 /* =========================
@@ -64,29 +75,19 @@ function current(chatId: number) {
 ========================= */
 async function fetchSearch(query: string) {
   const params = new URLSearchParams();
-
   params.append("req", query);
-
-  ["t", "a", "s", "y", "p", "i"].forEach(v =>
-    params.append("columns[]", v)
-  );
-  ["f", "e", "s", "a", "p", "w"].forEach(v =>
-    params.append("objects[]", v)
-  );
-  ["l", "c", "f", "a", "m", "r", "s"].forEach(v =>
-    params.append("topics[]", v)
-  );
-
+  ["t", "a", "s", "y", "p", "i"].forEach((v) => params.append("columns[]", v));
+  ["f", "e", "s", "a", "p", "w"].forEach((v) => params.append("objects[]", v));
+  ["l", "c", "f", "a", "m", "r", "s"].forEach((v) => params.append("topics[]", v));
   params.append("res", "25");
   params.append("filesuns", "all");
   params.append("curtab", "e");
 
   const url = `${TARGET_URL}/index.php?${params.toString()}`;
-
   const { data } = await axios.get(url);
   const $ = cheerio.load(data);
 
-  const results: any[] = [];
+  const results: { title: string; url: string }[] = [];
 
   $("tbody tr").each((_, el) => {
     const cell = $(el).find("td").eq(1);
@@ -97,10 +98,7 @@ async function fetchSearch(query: string) {
 
     if (!title || !href) return;
 
-    const full = href.startsWith("http")
-      ? href
-      : `${TARGET_URL}/${href}`;
-
+    const full = href.startsWith("http") ? href : `${TARGET_URL}/${href}`;
     results.push({ title, url: full });
   });
 
@@ -108,58 +106,68 @@ async function fetchSearch(query: string) {
 }
 
 /* =========================
-   FETCH ANY PAGE LINKS (FIXED)
-   - EXCLUDES NAVBAR LINKS
+   FETCH ANY PAGE LINKS
 ========================= */
 async function fetchPage(url: string) {
   const { data } = await axios.get(url);
   const $ = cheerio.load(data);
 
   const items: { title: string; url: string }[] = [];
+  const seenUrls = new Set<string>(); // Prevent duplicate links on the same page
 
   $("a[href]").each((_, el) => {
     const elAny = $(el);
-
     const href = elAny.attr("href");
-    const title = elAny.text().trim();
+    
+    // Try inner text, fallback to title attribute
+    const title = elAny.text().trim() || elAny.attr("title")?.trim();
 
-    if (!href || title.length < 2) return;
+    if (!href || !title || title.length < 2) return;
 
-    // ❌ skip junk links
+    // ❌ Skip junk links
+    if (href.startsWith("javascript") || href.startsWith("#") || href.startsWith("mailto:")) return;
+
+    // ❌ SKIP NAVBAR / FOOTER / HEADER LINKS
     if (
-      href.startsWith("javascript") ||
-      href === "#"
-    ) return;
-
-    // ❌ SKIP ANY LINK INSIDE NAVBAR
-    if (
-      elAny.closest(".navbar").length > 0 ||
-      elAny.closest("nav").length > 0
-    ) return;
+      elAny.closest(".navbar, nav, header, footer, [class*='nav'], [class*='menu']").length > 0
+    ) {
+      return;
+    }
 
     const full = href.startsWith("http")
       ? href
       : `${TARGET_URL}/${href.replace(/^\//, "")}`;
 
+    if (seenUrls.has(full)) return;
+    seenUrls.add(full);
+
     items.push({
-      title,
+      title: title.replace(/\s+/g, ' '), // Clean up multi-line text
       url: full,
     });
   });
 
+  // Limit to 10 to avoid huge messages (adjust if needed)
   return items.slice(0, 10);
 }
 
 /* =========================
    RENDER NODE
 ========================= */
-async function render(chatId: number, url: string) {
-  push(chatId, url);
+async function render(chatId: number, url: string, isBacking: boolean = false) {
+  if (!isBacking) {
+    push(chatId, url);
+  }
 
   const items = await fetchPage(url);
 
   if (items.length === 0) {
-    await send(chatId, "No further links.");
+    const stack = navStack.get(chatId) || [];
+    const backMarkup = stack.length > 1 ? {
+      inline_keyboard: [[{ text: "⬅ Back", callback_data: "back" }]]
+    } : undefined;
+
+    await send(chatId, "No further links found on this page.", { reply_markup: backMarkup });
     return;
   }
 
@@ -167,25 +175,22 @@ async function render(chatId: number, url: string) {
     .map((i, idx) => `${idx + 1}. ${i.title}`)
     .join("\n");
 
-  const keyboard = {
-    inline_keyboard: [
-      ...items.map((i) => [
-        {
-          text: i.title.slice(0, 30),
-          callback_data: `open:${encodeURIComponent(i.url)}`,
-        },
-      ]),
-      [
-        {
-          text: "⬅ Back",
-          callback_data: "back",
-        },
-      ],
-    ],
-  };
+  const inline_keyboard = items.map((i) => [
+    {
+      text: i.title.length > 30 ? i.title.slice(0, 27) + "..." : i.title,
+      // Use cache ID to stay under 64-byte Telegram limit
+      callback_data: `o:${cacheUrl(i.url)}`,
+    },
+  ]);
 
-  await send(chatId, message, {
-    reply_markup: keyboard,
+  // Add back button if we have history
+  const stack = navStack.get(chatId) || [];
+  if (stack.length > 1) {
+    inline_keyboard.push([{ text: "⬅ Back", callback_data: "back" }]);
+  }
+
+  await send(chatId, message || "Select a link:", {
+    reply_markup: { inline_keyboard },
   });
 }
 
@@ -195,10 +200,7 @@ async function render(chatId: number, url: string) {
 export async function POST(req: Request) {
   const body: Update = await req.json();
 
-  const chatId =
-    body.message?.chat.id ||
-    body.callback_query?.message.chat.id;
-
+  const chatId = body.message?.chat.id || body.callback_query?.message.chat.id;
   if (!chatId) return NextResponse.json({ ok: true });
 
   const cb = body.callback_query?.data;
@@ -208,26 +210,32 @@ export async function POST(req: Request) {
      BACK BUTTON
   ========================= */
   if (cb === "back") {
-    pop(chatId);
+    const prevUrl = pop(chatId);
 
-    const prev = current(chatId);
-
-    if (!prev) {
+    if (!prevUrl) {
       await send(chatId, "No previous page.");
       return NextResponse.json({ ok: true });
     }
 
     await send(chatId, "⬅ Going back...");
-    await render(chatId, prev);
-
+    // Pass `true` so we don't re-push it to the stack
+    await render(chatId, prevUrl, true); 
     return NextResponse.json({ ok: true });
   }
 
   /* =========================
-     OPEN NODE
+     OPEN NODE (Using Short ID)
   ========================= */
-  if (cb?.startsWith("open:")) {
-    const url = decodeURIComponent(cb.replace("open:", ""));
+  if (cb?.startsWith("o:")) {
+    const shortId = cb.replace("o:", "");
+    const url = urlCache.get(shortId);
+    
+    if (!url) {
+      await send(chatId, "Link expired or invalid. Please search again.");
+      return NextResponse.json({ ok: true });
+    }
+
+    await send(chatId, "⏳ Loading page...");
     await render(chatId, url);
     return NextResponse.json({ ok: true });
   }
@@ -237,22 +245,36 @@ export async function POST(req: Request) {
   ========================= */
   if (text?.startsWith("/search")) {
     const query = text.replace("/search", "").trim();
+    if (!query) {
+      await send(chatId, "Please provide a search term. Example: /search matrix");
+      return NextResponse.json({ ok: true });
+    }
 
+    await send(chatId, "🔍 Searching...");
     const results = await fetchSearch(query);
 
-    const keyboard = {
-      inline_keyboard: results.slice(0, 5).map((r) => [
-        {
-          text: r.title.slice(0, 30),
-          callback_data: `open:${encodeURIComponent(r.url)}`,
-        },
-      ]),
-    };
+    if (results.length === 0) {
+      await send(chatId, "No results found.");
+      return NextResponse.json({ ok: true });
+    }
+
+    // Reset stack on new search
+    navStack.set(chatId, []);
+
+    const inline_keyboard = results.slice(0, 5).map((r) => [
+      {
+        text: r.title.length > 30 ? r.title.slice(0, 27) + "..." : r.title,
+        callback_data: `o:${cacheUrl(r.url)}`,
+      },
+    ]);
+
+    // Push the search url so 'back' works properly even from root search
+    push(chatId, `search:${query}`);
 
     await send(
       chatId,
-      results.map((r, i) => `${i + 1}. ${r.title}`).join("\n"),
-      { reply_markup: keyboard }
+      results.slice(0, 5).map((r, i) => `${i + 1}. ${r.title}`).join("\n"),
+      { reply_markup: { inline_keyboard } }
     );
 
     return NextResponse.json({ ok: true });
