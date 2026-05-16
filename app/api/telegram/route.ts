@@ -5,6 +5,7 @@ import * as cheerio from 'cheerio'
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN as string
 const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`
+const TARGET_URL=process.env.TELEGRAM_TOKEN as string as string
 
 type TelegramMessage = {
   message?: {
@@ -39,7 +40,7 @@ export async function POST(req: Request): Promise<NextResponse> {
         }
 
         // 1. Fetch HTML with the dynamic user query
-        const targetUrl = `https://my-website/index.php?req=${encodeURIComponent(query)}&curtab=e&order=year&ordermode=asc`
+        const targetUrl = `${TARGET_URL}/index.php?req=${encodeURIComponent(query)}&curtab=e&order=year&ordermode=asc`
         const { data: html } = await axios.get<string>(targetUrl)
 
         // 2. Parse HTML
@@ -56,7 +57,7 @@ export async function POST(req: Request): Promise<NextResponse> {
           if (title && link) {
             resultsText += `*${title}*\n`
             resultsText += `Publisher: ${publisher}\n`
-            resultsText += `Link: https://my-website/${link}\n\n`
+            resultsText += `Link: ${TARGET_URL}/${link}\n\n`
           }
         })
 
