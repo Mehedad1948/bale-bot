@@ -111,22 +111,36 @@ async function fetchDetailPage(url: string) {
 
   const items: { title: string; url: string }[] = [];
 
-  // ONLY main table links, NOT navbar
-  $("table#tablelibgen a[href]").each((_, el) => {
-    const parentNav = $(el).closest(".navbar");
-    if (parentNav.length) return; // 🔥 EXCLUDE NAVBAR
+  // grab only main content table rows
+  $("#tablelibgen tbody tr, table#tablelibgen tr").each((_, el) => {
+    const row = $(el);
 
-    const href = $(el).attr("href");
-    const text = $(el).text().trim();
+    // skip navbar or junk sections
+    if (row.closest(".navbar").length) return;
 
-    if (!href || text.length < 2) return;
-    if (href.startsWith("javascript") || href === "#") return;
+    const links = row.find("a[href]");
 
-    items.push({
-      title: text,
-      url: href.startsWith("http")
+    links.each((_, a) => {
+      const el = $(a);
+
+      const href = el.attr("href");
+      const text = el.text().trim();
+
+      if (!href || text.length < 2) return;
+      if (href.startsWith("javascript") || href === "#") return;
+
+      // avoid header links like "Year", "Issue"
+      if (
+        text.toLowerCase().includes("year") ||
+        text.toLowerCase().includes("issue")
+      )
+        return;
+
+      const full = href.startsWith("http")
         ? href
-        : `${TARGET_URL}/${href.replace(/^\//, "")}`,
+        : `${TARGET_URL}/${href.replace(/^\//, "")}`;
+
+      items.push({ title: text, url: full });
     });
   });
 
