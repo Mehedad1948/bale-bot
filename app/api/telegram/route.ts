@@ -118,30 +118,54 @@ export async function POST(req: Request): Promise<NextResponse> {
     // =========================
     // EXTRACT QUERY
     // =========================
+const query = userText.replace(/^\/search\s*/i, "").trim();
 
-    const query = userText.replace(/^\/search\s*/i, "").trim();
+console.log("[QUERY]", query);
 
-    console.log("[QUERY]", query);
+if (!query) {
+  console.log("[ERROR] Empty query");
 
-    if (!query) {
-      console.log("[ERROR] Empty query");
+  await sendTelegramMessage(
+    chatId,
+    "Please provide a search query.\n\nExample:\n/search mathematics"
+  );
 
-      await sendTelegramMessage(
-        chatId,
-        "Please provide a search query.\n\nExample:\n/search mathematics"
-      );
+  return NextResponse.json({ message: "Empty query" });
+}
 
-      return NextResponse.json({ message: "Empty query" });
-    }
+// =========================
+// BUILD TARGET URL
+// =========================
 
-    // =========================
-    // BUILD TARGET URL
-    // =========================
+const params = new URLSearchParams();
 
-    const targetUrl =
-      `${TARGET_URL}/index.php?req=${encodeURIComponent(query)}`;
+// Main search query
+params.append("req", query);
 
-    console.log("[FETCH_URL]", targetUrl);
+// columns[]
+["t", "a", "s", "y", "p", "i"].forEach((value) => {
+  params.append("columns[]", value);
+});
+
+// objects[]
+["f", "e", "s", "a", "p", "w"].forEach((value) => {
+  params.append("objects[]", value);
+});
+
+// topics[]
+["l", "c", "f", "a", "m", "r", "s"].forEach((value) => {
+  params.append("topics[]", value);
+});
+
+// other params
+params.append("res", "25");
+params.append("filesuns", "all");
+params.append("curtab", "e");
+
+// Final URL
+const targetUrl = `${TARGET_URL}/index.php?${params.toString()}`;
+
+console.log("[FETCH_URL]", targetUrl);
 
     // =========================
     // FETCH HTML
