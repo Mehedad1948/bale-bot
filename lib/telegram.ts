@@ -1,6 +1,10 @@
 type JsonPrimitive = string | number | boolean | null;
+
+interface JsonRecord {
+  [key: string]: JsonValue;
+}
+
 type JsonValue = JsonPrimitive | JsonRecord | JsonValue[];
-type JsonRecord = Record<string, JsonValue>;
 
 const VALID_PARSE_MODES = new Set(["Markdown", "MarkdownV2", "HTML"]);
 const VALID_INLINE_BUTTON_FIELDS = new Set([
