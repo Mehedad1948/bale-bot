@@ -148,18 +148,19 @@ function normalizeReplyMarkup(body: TelegramProxyRequestBody) {
   if ("inline_keyboard" in replyMarkup) {
     const inlineKeyboard = replyMarkup.inline_keyboard;
 
-    if (
-      !Array.isArray(inlineKeyboard) ||
-      !inlineKeyboard.every(
-        (row) => Array.isArray(row) && row.every((button) => button !== undefined)
-      )
-    ) {
+    if (!Array.isArray(inlineKeyboard)) {
       throw new TelegramValidationError(
         '"replyMarkup.inline_keyboard" must be an array of button rows.'
       );
     }
 
     inlineKeyboard.forEach((row) => {
+      if (!Array.isArray(row)) {
+        throw new TelegramValidationError(
+          '"replyMarkup.inline_keyboard" must be an array of button rows.'
+        );
+      }
+
       row.forEach((button) => {
         validateInlineKeyboardButton(button);
       });
