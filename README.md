@@ -1,36 +1,132 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Telegram Proxy
 
-## Getting Started
+This project exposes a secured Telegram proxy endpoint for server-to-server notifications:
 
-First, run the development server:
-
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```text
+POST /api/telegram/proxy/:chatId
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Environment Variables
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```env
+TELEGRAM_PROXY_SECRET=your-shared-secret
+TELEGRAM_TOKEN=optional-default-bot-token
+TELEGRAM_BOT_CHAT_ID=optional-default-chat-id-for-/api/telegram
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Headers
 
-## Learn More
+- `x-telegram-proxy-secret`: required
+- `x-telegram-bot-token`: optional if `TELEGRAM_TOKEN` is set on this app
 
-To learn more about Next.js, take a look at the following resources:
+## Request Body
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Backward-compatible body:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```json
+{
+  "message": "Build completed successfully"
+}
+```
 
-## Deploy on Vercel
+Enhanced body:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```json
+{
+  "message": "Next.js build failed\n\n```bash\nerror log here\n```",
+  "parseMode": "Markdown",
+  "disableWebPagePreview": true,
+  "replyMarkup": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "Open Build",
+          "url": "https://example.com/build/123"
+        }
+      ]
+    ]
+  }
+}
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Supported enhanced fields:
+
+- `parseMode`: `Markdown`, `MarkdownV2`, or `HTML`
+- `disableWebPagePreview`: boolean
+- `replyMarkup`: Telegram `reply_markup` object
+
+Legacy snake_case fields remain supported:
+
+- `parse_mode`
+- `reply_markup`
+- `link_preview_options`
+
+## Examples
+
+### Plain Text Message
+
+```bash
+curl -X POST "https://your-domain/api/telegram/proxy/-1001234567890" \
+  -H "Content-Type: application/json" \
+  -H "x-telegram-proxy-secret: YOUR_PROXY_SECRET" \
+  -H "x-telegram-bot-token: YOUR_BOT_TOKEN" \
+  -d '{
+    "message": "Build completed successfully"
+  }'
+```
+
+### Markdown Code Block Message
+
+```bash
+curl -X POST "https://your-domain/api/telegram/proxy/-1001234567890" \
+  -H "Content-Type: application/json" \
+  -H "x-telegram-proxy-secret: YOUR_PROXY_SECRET" \
+  -H "x-telegram-bot-token: YOUR_BOT_TOKEN" \
+  -d '{
+    "message": "Next.js build failed\n\n```bash\nnpm run build\nError: Cannot find module\n```",
+    "parseMode": "Markdown"
+  }'
+```
+
+### HTML pre/code Message
+
+```bash
+curl -X POST "https://your-domain/api/telegram/proxy/-1001234567890" \
+  -H "Content-Type: application/json" \
+  -H "x-telegram-proxy-secret: YOUR_PROXY_SECRET" \
+  -H "x-telegram-bot-token: YOUR_BOT_TOKEN" \
+  -d '{
+    "message": "<b>Next.js build failed</b>\n<pre><code>npm run build\nError: Cannot find module</code></pre>",
+    "parseMode": "HTML"
+  }'
+```
+
+### Message With Inline Keyboard Button
+
+```bash
+curl -X POST "https://your-domain/api/telegram/proxy/-1001234567890" \
+  -H "Content-Type: application/json" \
+  -H "x-telegram-proxy-secret: YOUR_PROXY_SECRET" \
+  -H "x-telegram-bot-token: YOUR_BOT_TOKEN" \
+  -d '{
+    "message": "Build failed. Open the build details.",
+    "parseMode": "Markdown",
+    "disableWebPagePreview": true,
+    "replyMarkup": {
+      "inline_keyboard": [
+        [
+          {
+            "text": "Open Build",
+            "url": "https://example.com/build/123"
+          }
+        ]
+      ]
+    }
+  }'
+```
+
+## Notes
+
+- The proxy does not log secrets or bot tokens.
+- Invalid `parseMode`, malformed JSON, and malformed `replyMarkup` return `400`.
+- Telegram API failures are returned without exposing secrets.

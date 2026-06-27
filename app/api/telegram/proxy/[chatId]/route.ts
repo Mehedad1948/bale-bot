@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 
-import { sendTelegramMessage, type TelegramProxyRequestBody } from "@/lib/telegram";
+import {
+  TelegramApiError,
+  TelegramValidationError,
+  sendTelegramMessage,
+  type TelegramProxyRequestBody,
+} from "@/lib/telegram";
 
 const TELEGRAM_PROXY_SECRET = process.env.TELEGRAM_PROXY_SECRET;
 const DEFAULT_TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -75,16 +80,35 @@ export async function POST(
       messageId: result.messageId,
     });
   } catch (error) {
+    if (error instanceof SyntaxError) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Request body must be valid JSON.",
+        },
+        { status: 400 }
+      );
+    }
+
+    if (error instanceof TelegramValidationError || error instanceof TelegramApiError) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: error.message,
+        },
+        { status: error.status }
+      );
+    }
+
     const message =
       error instanceof Error ? error.message : "Unexpected server error.";
-    const status = message.includes('non-empty "message" or "text"') ? 400 : 500;
 
     return NextResponse.json(
       {
         ok: false,
         error: message,
       },
-      { status }
+      { status: 500 }
     );
   }
 }
