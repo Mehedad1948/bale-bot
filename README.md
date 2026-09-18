@@ -12,7 +12,36 @@ POST /api/telegram/proxy/:chatId
 TELEGRAM_PROXY_SECRET=your-shared-secret
 TELEGRAM_TOKEN=optional-default-bot-token
 TELEGRAM_BOT_CHAT_ID=optional-default-chat-id-for-/api/telegram
+GITLAB_TELEGRAM_PROXY_TOKEN=optional-separate-token-entered-in-gitlab
 ```
+
+## GitLab Telegram Integration
+
+GitLab's Telegram integration cannot send the custom secret header required by
+the general-purpose proxy above. A separate Telegram Bot API-compatible endpoint
+is available for it:
+
+```text
+POST /api/telegram/gitlab/bot<TOKEN>/sendMessage
+```
+
+Configure the GitLab integration as follows:
+
+- **Hostname:** `https://your-domain/api/telegram/gitlab`
+- **New token:** the value of `GITLAB_TELEGRAM_PROXY_TOKEN`
+- **Channel identifier:** the target Telegram chat or channel ID
+- **Message thread ID:** optional Telegram forum topic ID
+
+Set both `TELEGRAM_TOKEN` (the real Telegram bot token) and
+`GITLAB_TELEGRAM_PROXY_TOKEN` (a separate random secret) in Vercel. GitLab
+appends `/bot<TOKEN>/sendMessage` to the hostname; the route verifies that proxy
+token and substitutes the real bot token before forwarding the request to
+Telegram.
+
+If `GITLAB_TELEGRAM_PROXY_TOKEN` is omitted, the route falls back to using
+`TELEGRAM_TOKEN` for compatibility, so the real bot token must also be entered
+in GitLab. A separate proxy token is recommended because path values can appear
+in HTTP access logs.
 
 ## Headers
 
